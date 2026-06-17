@@ -22,11 +22,17 @@ The script will:
     - Save to a new file with a timestamp suffix
 
 USAGE:
-    python accrual_matcher.py <input_file> [sheet_name]
+    python accrual_matcher.py <input_file> [sheet_name] [vendor_csv]
 
 EXAMPLES:
     python accrual_matcher.py Transactions_to_Clean.xlsx
     python accrual_matcher.py Transactions_to_Clean.xlsx "Accrual - Data (Matched Detail)"
+    python accrual_matcher.py Transactions_to_Clean.xlsx "" "Legal List.csv"
+
+The vendor CSV is expected to have at least a "Vendor" column.  If a
+"Category" column is present, matched rows will also get that category.
+Default path (if not supplied):
+    C:\\Users\\chammer\\OneDrive - Red Roof\\Desktop\\Accrual Matcher\\Legal List.csv
 
 If no sheet name is provided, the script tries these defaults in order:
     1. "Accrual - Data (Matched Detail)"
@@ -62,6 +68,10 @@ DEFAULT_SHEET_NAMES = [
 ]
 
 MATCHING_COLS = ["MatchGroup", "MatchStatus", "MatchedWith", "NetCheck", "RowType"]
+
+DEFAULT_VENDOR_CSV = (
+    r"C:\Users\chammer\OneDrive - Red Roof\Desktop\Accrual Matcher\Legal List.csv"
+)
 
 # Column name mapping: maps the names used internally by the script to
 # possible header names found in source files.  The script will auto-detect
@@ -106,6 +116,83 @@ def normalise_columns(df):
     if "Company" not in df.columns:
         df["Company"] = "ALL"
 
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 0b. VENDOR EXTRACTION FROM GL DESCRIPTION
+# ---------------------------------------------------------------------------
+def load_vendor_list(csv_path):
+    """
+    Load the vendor reference CSV.  Returns a list of (vendor, category) tuples
+    sorted longest-vendor-first so partial matching prefers the most specific hit.
+    """
+    if not os.path.isfile(csv_path):
+        print(f"Warning: vendor list not found at {csv_path} — skipping vendor extraction")
+        return []
+
+    vdf = pd.read_csv(csv_path)
+    if "Vendor" not in vdf.columns:
+        print(f"Warning: vendor CSV has no 'Vendor' column — skipping vendor extraction")
+        return []
+
+    has_category = "Category" in vdf.columns
+    entries = []
+    for _, row in vdf.iterrows():
+        vendor = str(row["Vendor"]).strip()
+        if not vendor or vendor.lower() in ("nan", ""):
+            continue
+        category = str(row["Category"]).strip() if has_category else ""
+        entries.append((vendor, category))
+
+    # Sort longest first so "WILSON, ELSER, MOSKOWITZ, EDELMAN & DICKER, LLP"
+    # matches before a hypothetical shorter substring like "WILSON"
+    entries.sort(key=lambda x: len(x[0]), reverse=True)
+    return entries
+
+
+def extract_vendor_from_description(description, vendor_list):
+    """
+    Case-insensitive partial match of known vendor names against a GL Description.
+    Returns (vendor, category) on first (longest) hit, or (None, None).
+    """
+    desc_upper = str(description).upper()
+    for vendor, category in vendor_list:
+        if vendor.upper() in desc_upper:
+            return vendor, category
+    return None, None
+
+
+def apply_vendor_extraction(df, vendor_list):
+    """
+    Scan GL Description for known vendor names.  Always overwrites Mapped Vendor
+    when a match is found.  Also sets Category if the vendor list provides one.
+    """
+    if not vendor_list:
+        return df
+
+    if "GL Description" not in df.columns:
+        print("  No 'GL Description' column found — skipping vendor extraction")
+        return df
+
+    if "Mapped Vendor" not in df.columns:
+        df["Mapped Vendor"] = ""
+    if "Category" not in df.columns:
+        df["Category"] = ""
+
+    matched_count = 0
+    for idx, row in df.iterrows():
+        desc = row.get("GL Description", "")
+        if is_blank(desc):
+            continue
+        vendor, category = extract_vendor_from_description(desc, vendor_list)
+        if vendor is not None:
+            df.loc[idx, "Mapped Vendor"] = vendor
+            if category:
+                df.loc[idx, "Category"] = category
+            matched_count += 1
+
+    print(f"  Vendor extraction: {matched_count} rows matched from GL Description")
     return df
 
 
@@ -489,7 +576,8 @@ def main():
         print(f"Error: file not found: {input_path}")
         sys.exit(1)
 
-    requested_sheet = sys.argv[2] if len(sys.argv) >= 3 else None
+    requested_sheet = sys.argv[2] if len(sys.argv) >= 3 and sys.argv[2] else None
+    vendor_csv = sys.argv[3] if len(sys.argv) >= 4 else DEFAULT_VENDOR_CSV
     sheet_name = find_sheet(input_path, requested_sheet)
 
     # Build timestamped output path
@@ -506,6 +594,12 @@ def main():
     # Normalise column names to what the matching engine expects
     df = normalise_columns(df)
     print(f"  Columns after normalisation: {list(df.columns)}")
+
+    # Extract vendors from GL Description using the external vendor list
+    vendor_list = load_vendor_list(vendor_csv)
+    if vendor_list:
+        print(f"  Loaded {len(vendor_list)} vendors from {vendor_csv}")
+        df = apply_vendor_extraction(df, vendor_list)
 
     print("Matching...")
     df_matched, stats = match_transactions(df)
