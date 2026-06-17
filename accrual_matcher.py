@@ -307,6 +307,9 @@ def match_transactions(df):
     for col in ["MatchGroup", "MatchStatus", "MatchedWith"]:
         df[col] = df[col].fillna("").astype(str).replace("nan", "")
 
+    # Ensure NetCheck is numeric so we can write floats into it
+    df["NetCheck"] = pd.to_numeric(df["NetCheck"], errors="coerce")
+
     # Identify which rows need to be (re)processed
     needs_mask = df.apply(needs_matching, axis=1)
     new_count = needs_mask.sum()
