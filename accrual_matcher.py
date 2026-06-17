@@ -131,7 +131,7 @@ def load_vendor_list(csv_path):
         print(f"Warning: vendor list not found at {csv_path} — skipping vendor extraction")
         return []
 
-    vdf = pd.read_csv(csv_path)
+    vdf = pd.read_csv(csv_path, encoding="cp1252")
     if "Vendor" not in vdf.columns:
         print(f"Warning: vendor CSV has no 'Vendor' column — skipping vendor extraction")
         return []
